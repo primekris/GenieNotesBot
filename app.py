@@ -396,3 +396,19 @@ def open_website(message):
 # === RUN THE BOT ===
 print("🤖 Bot is running!")
 bot.infinity_polling()
+
+
+
+from flask import Flask
+import threading
+
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "Bot is running!", 200
+
+def run_web():
+    app_flask.run(host="0.0.0.0", port=3000)
+
+threading.Thread(target=run_web).start()
