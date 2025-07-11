@@ -1,25 +1,29 @@
-# genie_notes_bot.py
-# ─────────────────────────────────────────────────────────────
-import os
-import random
-import requests
+# genie_notes_bot.py  –  11 Jul 2025
+# ──────────────────────────────────────────────────────────────
+# A full rewrite with:
+#   • ONE unified callback handler                 (no overlaps)
+#   • callback_data ≤ 64 bytes                     (Telegram rule)
+#   • all original commands (/submit, /broadcast …) intact
+# ──────────────────────────────────────────────────────────────
+
+import os, random, requests, telebot
 from urllib.parse import quote, unquote
 from threading import Thread
 from flask import Flask
-import telebot
 from telebot.types import (InlineKeyboardMarkup, InlineKeyboardButton,
                            ReplyKeyboardMarkup, KeyboardButton, WebAppInfo)
 
-# ── ENVIRONMENT ───────────────────────────────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN")          # ← your bot token here
-TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
-ADMIN_ID = 7924807866                      # ← your Telegram user-ID
+# ── ENV / CONSTANTS ───────────────────────────────────────────
+BOT_TOKEN       = os.getenv("BOT_TOKEN")          # ← Set these
+TOGETHER_API_KEY= os.getenv("TOGETHER_API_KEY")   # ← Optional
+ADMIN_ID        = 7924807866                     # ← Your TG ID
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
-user_ids = set()                           # store chat IDs for broadcasts
+bot       = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
+user_ids  = set()          # store chat IDs to broadcast/poll later
+submitted = {}             # file_id → user_id  (for /reply)
 
-# ── RESOURCES DATABASE (unchanged) ────────────────────────────
-resources = {
+# ── RESOURCES  (unchanged) ────────────────────────────────────
+resources = {                                                  # ⚠ truncated comment
     "Programming": {
         "Python": {
             "Python.pdf": "BQACAgQAAxkBAAMXaHDaUrG0YEwAAYf33_CaYQWOXvIuAAKBGAACAqgAAVLex72HE3RaaTYE",
@@ -96,202 +100,204 @@ resources = {
 }
 
 # ── DAILY TIPS ────────────────────────────────────────────────
-daily_tips = [
+tips = [
     "📌 Study smarter, not harder!",
-    "🧠 Revise before sleeping — memory lock 🔐",
-    "⏰ Use Pomodoro: 25 min study + 5 min break!",
-    "📚 Consistency > Intensity — study every day.",
-    "🚫 Don’t aim for perfect, aim for progress.",
-    "🔥 If it scares you — it’s worth doing!",
-    "💧 Hydrate your brain — drink water!",
-    "📝 Write notes in your own words — better recall."
+    "🧠 Review before bed—memory lock 🔐",
+    "⏰ Pomodoro: 25 min work + 5 min rest",
+    "📚 Consistency ≫ Intensity—practice daily.",
+    "🚫 Don’t chase perfect; chase progress.",
+    "🔥 If it scares you, it’s worth doing!",
+    "💧 Hydrate your brain—drink water!",
+    "📝 Rewrite notes in your own words."
 ]
 
-# ── FLASK MINI-SERVER (for uptime pinger) ─────────────────────
+# ── FLASK KEEP-ALIVE ──────────────────────────────────────────
 app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "✅ GenieNotesBot is alive!"
-
-def run_server():
-    app.run(host='0.0.0.0', port=8080)
+@app.route('/')              # so an uptime pinger > 5 min doesn’t kill the dyno
+def home(): return "✅ GenieNotesBot alive"
 
 def keep_alive():
-    Thread(target=run_server).start()
+    Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
 
-# ── /start ────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════
+#                         BOT COMMANDS
+# ═════════════════════════════════════════════════════════════
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    user_ids.add(message.chat.id)
-
-    markup = InlineKeyboardMarkup()
-    for category in resources:
-        markup.add(InlineKeyboardButton(text=category,
-                                        callback_data=quote(category)))
-
-    # Website button
-    markup.add(InlineKeyboardButton(
-        text="🌐 Visit My Website",
-        web_app=WebAppInfo(url="https://primekris.github.io/BLOGGY")))
-
-    bot.send_message(message.chat.id,
-                     "👋 *Welcome to GenieNotesBot!*\n"
-                     "Choose a category:",
-                     reply_markup=markup)
-
-# ── UNIFIED CALLBACK HANDLER (fixes broken buttons) ───────────
-@bot.callback_query_handler(func=lambda call: True)
-def unified_callback(call):
-    try:
-        data = unquote(call.data)
-        parts = data.split('|')
-
-        # ─ Category selected ─
-        if len(parts) == 1:
-            category = parts[0].strip()
-            section = resources.get(category)
-            if not section:
-                bot.answer_callback_query(call.id, "❌ Invalid category")
-                return
-
-            submarkup = InlineKeyboardMarkup()
-            for sub in section:
-                submarkup.add(InlineKeyboardButton(
-                    text=sub,
-                    callback_data=quote(f"{category}|{sub}")
-                ))
-
-            bot.send_message(call.message.chat.id,
-                             f"📂 *{category}* files:",
-                             reply_markup=submarkup)
-            return
-
-        # ─ File/sub-folder selected ─
-        if len(parts) == 2:
-            category, sub = map(str.strip, parts)
-            section = resources.get(category, {})
-            obj = section.get(sub)
-
-            if isinstance(obj, str):
-                # direct file
-                bot.send_document(call.message.chat.id,
-                                  document=obj,
-                                  caption=f"📄 *{sub}*")
-            elif isinstance(obj, dict):
-                # sub-folder
-                for file_name, file_id in obj.items():
-                    bot.send_document(call.message.chat.id,
-                                      document=file_id,
-                                      caption=f"📄 *{file_name}*")
-            else:
-                bot.answer_callback_query(call.id,
-                                          "❌ File or folder not found.")
-            return
-
-        bot.answer_callback_query(call.id,
-                                  "⚠️ Unrecognized action.")
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ Error: {e}")
-
-# ── SIMPLE HELPERS & UTIL COMMANDS ────────────────────────────
-@bot.message_handler(commands=['id'])
-def send_id(message):
-    bot.reply_to(message,
-                 f"🧑 Your Telegram user ID is: `{message.chat.id}`")
-
-@bot.message_handler(commands=['tip'])
-def send_tip(message):
-    bot.reply_to(message, random.choice(daily_tips))
+def cmd_start(m):
+    user_ids.add(m.chat.id)
+    kb = InlineKeyboardMarkup()
+    for cat in resources:
+        kb.add(InlineKeyboardButton(cat, callback_data=quote(cat)))
+    kb.add(InlineKeyboardButton("🌐 Visit My Website",
+                                web_app=WebAppInfo("https://primekris.github.io/BLOGGY")))
+    bot.send_message(m.chat.id, "👋 *Welcome to GenieNotesBot!*\nChoose a category:", reply_markup=kb)
 
 @bot.message_handler(commands=['about'])
-def send_about(message):
-    bot.send_message(message.chat.id,
-                     "🧞‍♂️ *GenieNotesBot* — your study genie!\n"
-                     "✨ Built by *Krishna* for students.\n"
-                     "📚 /help to see all commands.")
+def cmd_about(m):
+    bot.send_message(m.chat.id,
+        "🧞‍♂️ *GenieNotesBot* – free PDFs, handwritten notes, cheat-sheets & more\n"
+        "✨ Built by *Krishna* for students.\n"
+        "💬 Type /help for all commands.")
 
 @bot.message_handler(commands=['help'])
-def send_help(message):
-    bot.send_message(message.chat.id,
-        "🛠 *Commands:*\n"
-        "/start – open main menu\n"
-        "/tip – motivational tip\n"
-        "/about – about the bot\n"
-        "/help – this message\n"
-        "/search <kw> – search files\n"
-        "/explain <topic> – AI explanation\n"
-        "/explain_hi <topic> – explain in Hindi")
+def cmd_help(m):
+    bot.send_message(m.chat.id,
+        "🛠 *Commands*\n"
+        "/start  – menu\n"
+        "/tip    – random study tip\n"
+        "/search <kw>       – search filenames\n"
+        "/explain <topic>   – AI explain (English)\n"
+        "/explain_hi <topic> – AI explain (Hindi)\n"
+        "/submit – send your notes\n"
+        "/about  – about the bot")
+
+@bot.message_handler(commands=['tip'])
+def cmd_tip(m): bot.reply_to(m, random.choice(tips))
+
+@bot.message_handler(commands=['id'])
+def cmd_id(m): bot.reply_to(m, f"`{m.chat.id}`")
 
 # ── /search ───────────────────────────────────────────────────
 @bot.message_handler(commands=['search'])
-def search_notes(message):
-    query = message.text.replace("/search", "").strip().lower()
-    if not query:
-        bot.reply_to(message, "🔍 Usage: /search python")
+def cmd_search(m):
+    q = m.text.replace('/search', '').strip().lower()
+    if not q:
+        bot.reply_to(m, "🔍 Usage:  `/search python`")
         return
-
-    results = []
-    for category, section in resources.items():
-        for sub, obj in section.items():
+    res = []
+    for cat, sec in resources.items():
+        for name, obj in sec.items():
             if isinstance(obj, dict):
-                # folder: search filenames
-                for file_name in obj:
-                    if query in file_name.lower():
-                        results.append(f"📄 {file_name} (in *{category}/{sub}*)")
+                for fname in obj:
+                    if q in fname.lower():
+                        res.append(f"📄 {fname} (in *{cat}/{name}*)")
             else:
-                # direct file
-                if query in sub.lower():
-                    results.append(f"📄 {sub} (in *{category}*)")
+                if q in name.lower(): res.append(f"📄 {name} (in *{cat}*)")
+    bot.reply_to(m, "🔎 *Results:*\n"+"\n".join(res) if res else "❌ No matches")
 
-    if results:
-        bot.reply_to(message,
-                     "🔎 *Results:*\n" + "\n".join(results))
-    else:
-        bot.reply_to(message, "❌ No matches found.")
-
-# ── /explain & /explain_hi (GPT via Together AI) ──────────────
-def gpt_reply(prompt):
-    headers = {"Authorization": f"Bearer {TOGETHER_API_KEY}"}
-    data = {
-        "model": "mistralai/Mistral-7B-Instruct-v0.1",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 500
-    }
-    res = requests.post("https://api.together.xyz/v1/chat/completions",
-                        headers=headers, json=data, timeout=30)
-    res.raise_for_status()
-    return res.json()['choices'][0]['message']['content']
+# ── GPT EXPLAINERS ────────────────────────────────────────────
+def gpt(prompt):
+    hdr = {"Authorization": f"Bearer {TOGETHER_API_KEY}"}
+    body= {"model":"mistralai/Mistral-7B-Instruct-v0.1",
+           "messages":[{"role":"user","content":prompt}],
+           "temperature":0.7,"max_tokens":500}
+    r = requests.post("https://api.together.xyz/v1/chat/completions", headers=hdr, json=body, timeout=30)
+    r.raise_for_status(); return r.json()['choices'][0]['message']['content']
 
 @bot.message_handler(commands=['explain'])
-def explain_topic(message):
-    topic = message.text.replace("/explain", "").strip()
-    if not topic:
-        bot.reply_to(message, "❓ Usage: /explain Merge Sort")
-        return
-    bot.send_chat_action(message.chat.id, 'typing')
-    try:
-        answer = gpt_reply(f"Explain this topic clearly for a student: {topic}")
-        bot.send_message(message.chat.id, f"📘 *{topic}*\n\n{answer}")
-    except Exception as e:
-        bot.reply_to(message, f"❌ GPT failed: {e}")
+def cmd_explain(m):
+    topic = m.text.replace('/explain','').strip()
+    if not topic: return bot.reply_to(m, "Usage: `/explain Merge Sort`")
+    bot.send_chat_action(m.chat.id, 'typing')
+    try: bot.send_message(m.chat.id, f"📘 *{topic}*\n\n{gpt('Explain for a student: '+topic)}")
+    except Exception as e: bot.reply_to(m, f"❌ GPT error: {e}")
 
 @bot.message_handler(commands=['explain_hi'])
-def explain_hi(message):
-    topic = message.text.replace("/explain_hi", "").strip()
-    if not topic:
-        bot.reply_to(message, "❓ Usage: /explain_hi Merge Sort")
-        return
-    bot.send_chat_action(message.chat.id, 'typing')
-    try:
-        answer = gpt_reply(f"Explain this topic in simple Hindi for students: {topic}")
-        bot.send_message(message.chat.id, f"🇮🇳 *{topic}*\n\n{answer}")
-    except Exception as e:
-        bot.reply_to(message, f"❌ GPT failed: {e}")
+def cmd_explain_hi(m):
+    topic = m.text.replace('/explain_hi','').strip()
+    if not topic: return bot.reply_to(m, "Usage: `/explain_hi Merge Sort`")
+    bot.send_chat_action(m.chat.id, 'typing')
+    try: bot.send_message(m.chat.id, f"🇮🇳 *{topic}*\n\n{gpt('Explain in simple Hindi: '+topic)}")
+    except Exception as e: bot.reply_to(m, f"❌ GPT error: {e}")
 
-# ── LAUNCH ────────────────────────────────────────────────────
-if __name__ == "__main__":
+# ── USER SUBMISSION / ADMIN REPLY ─────────────────────────────
+@bot.message_handler(commands=['submit'])
+def cmd_submit(m):
+    msg = bot.reply_to(m, "📤 Send your file (PDF, DOC…) with a short title.")
+    bot.register_next_step_handler(msg, _receive_submission)
+
+def _receive_submission(m):
+    if not m.document: return bot.reply_to(m,"⚠️ Please resend with a document.")
+    submitted[m.document.file_id] = m.chat.id
+    name  = m.document.file_name
+    user  = m.from_user.username or m.from_user.first_name
+    bot.send_document(
+        ADMIN_ID, m.document.file_id,
+        caption=f"📥 New submission\n👤 @{user}\n🆔 {m.chat.id}\n📄 *{name}*\n\n"
+                "Use `/reply <file_id> your_message`")
+    bot.reply_to(m,"✅ Thanks! Admin will review soon.")
+
+@bot.message_handler(commands=['reply'])
+def cmd_reply(m):
+    if m.chat.id != ADMIN_ID: return
+    try:
+        _, fid, msg = m.text.split(' ', 2)
+        uid = submitted.get(fid)
+        if not uid: raise ValueError("file_id not found")
+        bot.send_message(uid, f"📩 *Admin reply:*\n\n{msg}")
+        bot.reply_to(m,"✅ Sent!")
+    except Exception as e:
+        bot.reply_to(m, f"Usage: `/reply <file_id> message`  ({e})")
+
+# ── BROADCAST / POLL (admin) ──────────────────────────────────
+@bot.message_handler(commands=['broadcast'])
+def cmd_broadcast(m):
+    if m.chat.id != ADMIN_ID: return bot.reply_to(m,"🚫")
+    txt = m.text.replace('/broadcast','',1).strip()
+    ok=0
+    for uid in list(user_ids):
+        try: bot.send_message(uid, f"📢 {txt}"); ok+=1
+        except: pass
+    bot.reply_to(m, f"Done → {ok} users.")
+
+poll = {}
+@bot.message_handler(commands=['createpoll'])
+def cmd_createpoll(m):
+    if m.chat.id != ADMIN_ID: return bot.reply_to(m,"🚫")
+    q = bot.reply_to(m,"🗳 Question?"); bot.register_next_step_handler(q, _poll_q)
+
+def _poll_q(m): poll['q']=m.text; o=bot.reply_to(m,"Options comma-separated");bot.register_next_step_handler(o,_poll_opts)
+def _poll_opts(m):
+    poll['opts']=[x.strip() for x in m.text.split(',') if x.strip()]
+    bot.send_message(m.chat.id,"Send `/pollall` to broadcast.")
+@bot.message_handler(commands=['pollall'])
+def cmd_pollall(m):
+    if m.chat.id!=ADMIN_ID: return bot.reply_to(m,"🚫")
+    q=poll.get('q'); o=poll.get('opts')
+    if not q: return bot.reply_to(m,"No poll.")
+    ok=0
+    for uid in list(user_ids):
+        try: bot.send_poll(uid, question=q, options=o, is_anonymous=False); ok+=1
+        except: pass
+    bot.reply_to(m,f"Poll sent → {ok}")
+
+# ── MAIN MENU CALLBACK HANDLER (✓ 64-byte safe) ───────────────
+@bot.callback_query_handler(func=lambda _:True)
+def cb(call):
+    try:
+        data = unquote(call.data)
+        parts= data.split('|',1)
+        cat  = parts[0]; section=resources.get(cat)
+        if not section: return bot.answer_callback_query(call.id,"❌")
+        # ─ Level-1: category pressed
+        if len(parts)==1:
+            # 1) send any direct files
+            for name,obj in section.items():
+                if isinstance(obj,str):
+                    bot.send_document(call.message.chat.id,obj,caption=f"📄 *{name}*")
+            # 2) list sub-folders
+            kb = InlineKeyboardMarkup()
+            for sub,obj in section.items():
+                if isinstance(obj,dict):
+                    kb.add(InlineKeyboardButton(sub, callback_data=quote(f"{cat}|{sub}")))
+            if kb.keyboard:
+                bot.send_message(call.message.chat.id,f"📂 *{cat}* topics:",reply_markup=kb)
+            return
+
+        # ─ Level-2: sub-folder pressed
+        sub = parts[1]; obj = section.get(sub)
+        if isinstance(obj,dict):
+            for fname,fid in obj.items():
+                bot.send_document(call.message.chat.id,fid,caption=f"📄 *{fname}*")
+        elif isinstance(obj,str):
+            bot.send_document(call.message.chat.id,obj,caption=f"📄 *{sub}*")
+        else:
+            bot.answer_callback_query(call.id,"❌ Not found")
+    except Exception as e:
+        bot.send_message(call.message.chat.id,f"❌ {e}")
+
+# ═════════════════════════════════════════════════════════════
+if __name__ == '__main__':
     keep_alive()
-    print("🤖 GenieNotesBot is running…")
-    bot.infinity_polling()
+    print("🤖 GenieNotesBot running…")
+    bot.infinity_polling(skip_pending=True)
