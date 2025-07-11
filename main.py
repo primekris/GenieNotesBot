@@ -300,4 +300,6 @@ def cb(call):
 if __name__ == '__main__':
     keep_alive()
     print("🤖 GenieNotesBot running…")
+  bot.delete_webhook(drop_pending_updates=True)
+  print("✅ GenieNotesBot build: 2025-07-11-clean")
     bot.infinity_polling(skip_pending=True)
