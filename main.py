@@ -3,6 +3,9 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import os
 import random
 from urllib.parse import quote, unquote
+import time
+from datetime import datetime, time as dtime
+from threading import Thread
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -623,11 +626,53 @@ def run():
 def keep_alive():
     t = Thread(target=run)
     t.start()
+# okkkkkk3
+def check_wakeup():
+    while True:
+        now = datetime.now().time()
+        if dtime(6, 1) <= now <= dtime(6, 2):
+            print("🌅 6:01 AM — Sending wake-up message and starting bot!")
+            for user_id in user_ids:
+                try:
+                    bot.send_message(user_id, "🌞 Good morning! GenieNotesBot is now awake. Type /start to continue!")
+                except:
+                    pass
+            bot.infinity_polling()  # Start polling once awake
+            break  # Exit this thread — polling takes over
+        time.sleep(60)
+        
 
 # 👉 START the web server first
+# keep_alive()
+
+
+# # === RUN THE BOT ===
+# print("🤖 Bot is running!")
+# bot.infinity_polling()
+
+
+# 👉 Start Flask web server
 keep_alive()
 
+now = datetime.now().time()
 
-# === RUN THE BOT ===
-print("🤖 Bot is running!")
-bot.infinity_polling()
+# ⏰ Night sleep window: 1 AM to 6 AM
+if dtime(1, 0) <= now <= dtime(6, 0):
+    print("😴 GenieNotesBot is sleeping from 1 AM to 6 AM.")
+
+    def sleep_message():
+        while True:
+            try:
+                for user_id in user_ids:
+                    bot.send_message(user_id, "😴 GenieNotesBot is sleeping. Come back after 6:00 AM.")
+                break
+            except:
+                pass
+
+    Thread(target=sleep_message).start()
+    Thread(target=check_wakeup).start()
+
+else:
+    print("🤖 GenieNotesBot is running!")
+    bot.infinity_polling()
+
